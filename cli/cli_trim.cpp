@@ -28,6 +28,7 @@
 #include <string.h>
 #include <limits.h> // for CHAR_MAX
 #include <getopt.h>
+#include <set>
 
 #include "cli.hpp"
 
@@ -93,6 +94,48 @@ struct trim_options {
     int thread;
 };
 
+/* This utility class is useful for managing disordered traces
+ * (traces with multithreaded commands where the commands are not
+ * in numeric order).
+ */
+class ContiguousNumberTracker
+{
+public:
+    unsigned nextExpectedNumber;
+    std::set<unsigned> receivedOutOfOrder;
+
+    ContiguousNumberTracker(void)
+    {
+        nextExpectedNumber = 0;
+    }
+
+    /* Add another number to the set of finished numbers, and return the
+     * highest N such that all numbers from 0-N have been finish().
+     */
+    unsigned
+    finish(unsigned n)
+    {
+        if (n == nextExpectedNumber) {
+            nextExpectedNumber++;
+
+            // Catch up: if there are other "finished" numbers that are
+            // in queue that immediately follow this one, flush them
+            // out and advance.
+            while (receivedOutOfOrder.erase(nextExpectedNumber)) {
+                nextExpectedNumber++;
+            }
+        } else {
+            // Otherwise, this number is out of order.  Add this to the
+            // list of finished numbers to resolve later.
+            receivedOutOfOrder.insert(n);
+        }
+
+        // The caller will want to know how many contiguous numbers
+        // have been finished.
+        return nextExpectedNumber;
+    }
+};
+
 static int
 trim_trace(const char *filename, struct trim_options *options)
 {
@@ -121,16 +164,10 @@ trim_trace(const char *filename, struct trim_options *options)
 
     frame = 0;
     trace::Call *call;
+    ContiguousNumberTracker callNumberTracker;
+
     while ((call = p.parse_call())) {
-
-        /* There's no use doing any work past the last call and frame
-         * requested by the user. */
-        if ((options->calls.empty() || call->no > options->calls.getLast()) &&
-            (options->frames.empty() || frame > options->frames.getLast())) {
-
-            delete call;
-            break;
-        }
+        unsigned nextExpectedCall;
 
         /* If requested, ignore all calls not belonging to the specified thread. */
         if (options->thread != -1 && call->thread_id != options->thread) {
@@ -144,6 +181,18 @@ trim_trace(const char *filename, struct trim_options *options)
             options->frames.contains(frame, call->flags)) {
 
             writer.writeCall(call);
+        }
+
+
+        /* There's no use doing any work past the last call and frame
+         * requested by the user.  We have to be careful about out-of-order
+         * calls in the trace file,though. */
+        nextExpectedCall = callNumberTracker.finish(call->no);
+        if ((options->calls.empty() || nextExpectedCall > options->calls.getLast()) &&
+            (options->frames.empty() || frame > options->frames.getLast())) {
+
+            delete call;
+            break;
         }
 
     NEXT:

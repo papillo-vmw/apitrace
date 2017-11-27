@@ -167,40 +167,37 @@ trim_trace(const char *filename, struct trim_options *options)
     ContiguousNumberTracker callNumberTracker;
 
     while ((call = p.parse_call())) {
-        unsigned nextExpectedCall;
 
-        /* If requested, ignore all calls not belonging to the specified thread. */
-        if (options->thread != -1 && call->thread_id != options->thread) {
-            goto NEXT;
-        }
+        /* We have to mark that we've seen all calls, even if we're going
+         * to skip them below.
+         */
+        unsigned nextExpectedCall = callNumberTracker.finish(call->no);
 
-        /* If this call is included in the user-specified call set,
-         * then require it (and all dependencies) in the trimmed
-         * output. */
-        if (options->calls.contains(*call) ||
-            options->frames.contains(frame, call->flags)) {
-
+        /* Choose which calls to write.  If we've asked for only calls from
+         * a specified thread to be processed, skip any calls not belonging to
+         * that thread.  If we've specified a callset or frameset, skip any
+         * calls that aren't in one of those sets. */
+        if ((options->thread == -1 || call->thread_id == options->thread) &&
+            (options->calls.contains(*call) || options->frames.contains(frame, call->flags))) {
             writer.writeCall(call);
         }
 
-
-        /* There's no use doing any work past the last call and frame
-         * requested by the user.  We have to be careful about out-of-order
-         * calls in the trace file,though. */
-        nextExpectedCall = callNumberTracker.finish(call->no);
-        if ((options->calls.empty() || nextExpectedCall > options->calls.getLast()) &&
-            (options->frames.empty() || frame > options->frames.getLast())) {
-
-            delete call;
-            break;
-        }
-
-    NEXT:
+        /* Keep track of frame numbers, even if the call wasn't written. */
         if (call->flags & trace::CALL_FLAG_END_FRAME) {
             frame++;
         }
 
+        /* Done with the call object now */
         delete call;
+
+        /* There's no use doing any work past the last call and frame
+         * requested by the user.  We have to be careful about out-of-order
+         * calls in the trace file,though. */
+        if ((options->calls.empty() || nextExpectedCall > options->calls.getLast()) &&
+            (options->frames.empty() || frame > options->frames.getLast())) {
+
+            break;
+        }
     }
 
     std::cerr << "Trimmed trace is available as " << options->output << "\n";
